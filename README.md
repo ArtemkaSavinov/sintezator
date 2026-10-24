@@ -1,0 +1,91 @@
+# Синтезатор нот для Nexys A7-100T
+
+Проект формирует семь натуральных нот четвёртой октавы и диатонические
+трёхзвучные аккорды, позволяет выбирать их кнопками `BTNU`/`BTND` и выводит
+звук через разъём `MONO AUDIO OUT`.
+
+## Структура тракта
+
+`кнопки -> номер ступени -> 3 x (фазовый аккумулятор + CORDIC) -> микшер -> PDM -> AUD_PWM`
+
+- Тактовая частота: 100 МГц.
+- Фаза: 32 бита.
+- Три независимых CORDIC-генератора: 16 итераций, конвейерный режим.
+- Микшер складывает три голоса в 18 битах и делит результат на два, поэтому
+  переполнение 16-битного аудиотракта невозможно.
+- PDM: сигма-дельта первого порядка на частоте 100 МГц.
+- `AUD_PWM` формируется как open-drain: логический ноль — `0`, логическая единица — `Z`.
+- `AUD_SD` постоянно равен единице и включает аналоговый тракт.
+- Светодиоды `LED[6:0]` показывают выбранную ступень в one-hot виде.
+- `LED[7]` горит в режиме аккордов.
+
+## Ноты
+
+| Индекс | Нота | Расчётная частота, Гц | Фактическая частота DDS, Гц |
+|---:|:---:|---:|---:|
+| 0 | C4 (До) | 261,626 | 261,632 |
+| 1 | D4 (Ре) | 293,665 | 293,669 |
+| 2 | E4 (Ми) | 329,628 | 329,618 |
+| 3 | F4 (Фа) | 349,228 | 349,223 |
+| 4 | G4 (Соль) | 391,995 | 391,994 |
+| 5 | A4 (Ля) | 440,000 | 440,003 |
+| 6 | B4 (Си) | 493,883 | 493,880 |
+
+В исходном описании частота 439,88 Гц была отнесена к ноте Си. Это частота,
+близкая к Ля четвёртой октавы; Си четвёртой октавы имеет частоту около
+493,88 Гц. В RTL использован стандартный равномерно темперированный строй.
+
+## Управление
+
+- После сброса выбрана нота C4.
+- `BTNU` выбирает следующую ноту, `BTND` — предыдущую.
+- На границах список зацикливается.
+- `SW[0] = 0` — одиночная нота; `SW[0] = 1` — трезвучный аккорд.
+- `CPU_RESETN` — активный низким уровнем сброс.
+
+## Аккорды
+
+| Ступень | Аккорд | Голоса |
+|:---:|:---:|:---|
+| C | C major | C4, E4, G4 |
+| D | D minor | D4, F4, A4 |
+| E | E minor | E4, G4, B4 |
+| F | F major | F4, A4, C5 |
+| G | G major | G4, B4, D5 |
+| A | A minor | A4, C5, E5 |
+| B | B diminished | B4, D5, F5 |
+
+## Запуск тестов с Icarus Verilog
+
+Из корня репозитория:
+
+```powershell
+New-Item -ItemType Directory -Force build | Out-Null
+
+iverilog -g2012 -s cordic_sine_tb -o build/cordic_sine_tb.vvp rtl/*.v tb/cordic_sine_tb.v
+vvp build/cordic_sine_tb.vvp
+
+iverilog -g2012 -s pdm_dac_tb -o build/pdm_dac_tb.vvp rtl/*.v tb/pdm_dac_tb.v
+vvp build/pdm_dac_tb.vvp
+
+iverilog -g2012 -s note_frequency_lut_tb -o build/note_frequency_lut_tb.vvp rtl/*.v tb/note_frequency_lut_tb.v
+vvp build/note_frequency_lut_tb.vvp
+
+iverilog -g2012 -s chord_frequency_lut_tb -o build/chord_frequency_lut_tb.vvp rtl/*.v tb/chord_frequency_lut_tb.v
+vvp build/chord_frequency_lut_tb.vvp
+
+iverilog -g2012 -s audio_mixer_tb -o build/audio_mixer_tb.vvp rtl/*.v tb/audio_mixer_tb.v
+vvp build/audio_mixer_tb.vvp
+
+iverilog -g2012 -s sintezator_top_tb -o build/sintezator_top_tb.vvp rtl/*.v tb/sintezator_top_tb.v
+vvp build/sintezator_top_tb.vvp
+```
+
+Скрипт `scripts/create_project.tcl` подключает активный файл
+`constraints/sintezator.xdc`. Исходный `constraints/NexysA7_UART.xdc` оставлен
+как справочник по выводам и намеренно исключён из проекта: в нём команды
+повреждены переносами строк.
+
+Для первого прослушивания лучше использовать наушники или активную колонку и
+начать с невысокой громкости. Пассивный динамик непосредственно к линейному
+аудиовыходу подключать не следует.
