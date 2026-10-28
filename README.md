@@ -1,12 +1,12 @@
 # Синтезатор нот для Nexys A7-100T
 
-Проект формирует семь натуральных нот четвёртой октавы и диатонические
-трёхзвучные аккорды, позволяет выбирать их кнопками `BTNU`/`BTND` и выводит
-звук через разъём `MONO AUDIO OUT`.
+Проект формирует ноты и аккорды вручную либо принимает MIDI-клавиатуру через
+Pmod JA. До трёх одновременно удерживаемых MIDI-клавиш звучат полифонически.
+Звук выводится через разъём `MONO AUDIO OUT`.
 
 ## Структура тракта
 
-`кнопки -> номер ступени -> 3 x (фазовый аккумулятор + CORDIC) -> микшер -> PDM -> AUD_PWM`
+`кнопки / MIDI UART -> частоты 3 голосов -> 3 x (фазовый аккумулятор + CORDIC) -> микшер -> PDM -> AUD_PWM`
 
 - Тактовая частота: 100 МГц.
 - Фаза: 32 бита.
@@ -18,6 +18,7 @@
 - `AUD_SD` постоянно равен единице и включает аналоговый тракт.
 - Светодиоды `LED[6:0]` показывают выбранную ступень в one-hot виде.
 - `LED[7]` горит в режиме аккордов.
+- `LED[8]` горит в режиме MIDI; `LED[11:9]` показывают активные MIDI-голоса.
 
 ## Ноты
 
@@ -40,8 +41,33 @@
 - После сброса выбрана нота C4.
 - `BTNU` выбирает следующую ноту, `BTND` — предыдущую.
 - На границах список зацикливается.
-- `SW[0] = 0` — одиночная нота; `SW[0] = 1` — трезвучный аккорд.
+- `SW[1] = 0` — ручное управление кнопками.
+- В ручном режиме `SW[0] = 0` — одиночная нота, `SW[0] = 1` — трезвучие.
+- `SW[1] = 1` — MIDI-режим; положение `SW[0]` в нём не используется.
 - `CPU_RESETN` — активный низким уровнем сброс.
+
+## Подключение MIDI
+
+MIDI-приёмник работает в стандартном режиме `31250 бод, 8N1`, линия в покое
+имеет высокий уровень. Поддерживаются `Note On`, `Note Off`, running status и
+вариант `Note On` с velocity 0. Принимаются все MIDI-каналы. Значение velocity
+пока используется только для определения Note Off; громкость фиксированная.
+
+- `MIDI_dat` — контакт 1 разъёма JA, вывод FPGA C17.
+- Второй провод — GND разъёма JA (контакт 5 или 11).
+- В XDC включена внутренняя подтяжка вверх для open-collector выхода.
+- На `MIDI_dat` допустим только сигнал 0–3,3 В или open-collector/open-drain.
+  Подавать push-pull 5 В на C17 нельзя.
+- Для более надёжных фронтов рекомендуется внешний резистор 4,7 кОм между
+  `MIDI_dat` и 3,3 В на логической стороне оптопары.
+
+Если интерфейсная схема инвертирует UART, параметр `MIDI_INVERT` верхнего
+модуля нужно установить в `1`. Для обычного выхода оптопары с подтяжкой
+оставляется значение `0`.
+
+Распределитель предоставляет три голоса. При нажатии четвёртой клавиши один
+из занятых голосов заменяется циклически; отпускание клавиши освобождает её
+голос.
 
 ## Аккорды
 
@@ -76,6 +102,18 @@ vvp build/chord_frequency_lut_tb.vvp
 
 iverilog -g2012 -s audio_mixer_tb -o build/audio_mixer_tb.vvp rtl/*.v tb/audio_mixer_tb.v
 vvp build/audio_mixer_tb.vvp
+
+iverilog -g2012 -s midi_uart_rx_tb -o build/midi_uart_rx_tb.vvp rtl/*.v tb/midi_uart_rx_tb.v
+vvp build/midi_uart_rx_tb.vvp
+
+iverilog -g2012 -s midi_note_parser_tb -o build/midi_note_parser_tb.vvp rtl/*.v tb/midi_note_parser_tb.v
+vvp build/midi_note_parser_tb.vvp
+
+iverilog -g2012 -s midi_voice_allocator_tb -o build/midi_voice_allocator_tb.vvp rtl/*.v tb/midi_voice_allocator_tb.v
+vvp build/midi_voice_allocator_tb.vvp
+
+iverilog -g2012 -s midi_note_to_phase_inc_tb -o build/midi_note_to_phase_inc_tb.vvp rtl/*.v tb/midi_note_to_phase_inc_tb.v
+vvp build/midi_note_to_phase_inc_tb.vvp
 
 iverilog -g2012 -s sintezator_top_tb -o build/sintezator_top_tb.vvp rtl/*.v tb/sintezator_top_tb.v
 vvp build/sintezator_top_tb.vvp

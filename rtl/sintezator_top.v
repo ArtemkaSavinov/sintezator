@@ -2,16 +2,20 @@
 
 module sintezator_top #(
     parameter integer DEBOUNCE_CYCLES = 1_000_000,
-    parameter integer DEBOUNCE_COUNTER_WIDTH = 20
+    parameter integer DEBOUNCE_COUNTER_WIDTH = 20,
+    parameter integer MIDI_CLKS_PER_BIT = 3200,
+    parameter integer MIDI_COUNTER_WIDTH = 12,
+    parameter MIDI_INVERT = 1'b0
 ) (
-    input  wire       CLK100MHZ,
-    input  wire       CPU_RESETN,
-    input  wire       BTNU,
-    input  wire       BTND,
-    input  wire [0:0] SW,
-    inout  wire       AUD_PWM,
-    output wire       AUD_SD,
-    output wire [7:0] LED
+    input  wire        CLK100MHZ,
+    input  wire        CPU_RESETN,
+    input  wire        BTNU,
+    input  wire        BTND,
+    input  wire [1:0]  SW,
+    input  wire        MIDI_dat,
+    inout  wire        AUD_PWM,
+    output wire        AUD_SD,
+    output wire [11:0] LED
 );
     wire rst;
     wire up_pulse;
@@ -19,30 +23,57 @@ module sintezator_top #(
     wire up_state_unused;
     wire down_state_unused;
     wire [2:0] note_index;
-    wire [31:0] phase_increment_root;
-    wire [31:0] phase_increment_third;
-    wire [31:0] phase_increment_fifth;
-    wire [31:0] phase_root;
-    wire [31:0] phase_third;
-    wire [31:0] phase_fifth;
-    wire signed [15:0] root_sample;
-    wire signed [15:0] third_sample;
-    wire signed [15:0] fifth_sample;
+
+    reg [1:0] switch_meta;
+    reg [1:0] switch_sync;
+    wire chord_mode;
+    wire midi_mode;
+
+    wire [31:0] manual_phase_increment_root;
+    wire [31:0] manual_phase_increment_third;
+    wire [31:0] manual_phase_increment_fifth;
+
+    wire midi_rx_level;
+    wire [7:0] midi_byte;
+    wire midi_byte_valid;
+    wire midi_framing_error_unused;
+    wire midi_note_event_valid;
+    wire midi_note_event_on;
+    wire [6:0] midi_note_number;
+    wire [6:0] midi_velocity_unused;
+    wire [2:0] midi_voice_active;
+    wire [6:0] midi_voice_note_0;
+    wire [6:0] midi_voice_note_1;
+    wire [6:0] midi_voice_note_2;
+    wire [31:0] midi_phase_increment_0;
+    wire [31:0] midi_phase_increment_1;
+    wire [31:0] midi_phase_increment_2;
+
+    wire [31:0] selected_phase_increment_0;
+    wire [31:0] selected_phase_increment_1;
+    wire [31:0] selected_phase_increment_2;
+    wire [2:0] selected_voice_enable;
+    wire [31:0] phase_0;
+    wire [31:0] phase_1;
+    wire [31:0] phase_2;
+    wire signed [15:0] sample_0;
+    wire signed [15:0] sample_1;
+    wire signed [15:0] sample_2;
     wire signed [15:0] mixed_sample;
     wire pdm_bit;
-    reg chord_mode_meta;
-    reg chord_mode;
 
     assign rst = ~CPU_RESETN;
+    assign chord_mode = switch_sync[0];
+    assign midi_mode = switch_sync[1];
+    assign midi_rx_level = MIDI_INVERT ? ~MIDI_dat : MIDI_dat;
 
-    // Synchronize the asynchronous slide switch into the audio clock domain.
     always @(posedge CLK100MHZ) begin
         if (rst) begin
-            chord_mode_meta <= 1'b0;
-            chord_mode      <= 1'b0;
+            switch_meta <= 2'b00;
+            switch_sync <= 2'b00;
         end else begin
-            chord_mode_meta <= SW[0];
-            chord_mode      <= chord_mode_meta;
+            switch_meta <= SW;
+            switch_sync <= switch_meta;
         end
     end
 
@@ -76,60 +107,123 @@ module sintezator_top #(
         .note_index(note_index)
     );
 
-    chord_frequency_lut frequencies (
+    note_frequency_lut root_frequency (
         .note_index(note_index),
-        .phase_increment_root(phase_increment_root),
-        .phase_increment_third(phase_increment_third),
-        .phase_increment_fifth(phase_increment_fifth)
+        .phase_increment(manual_phase_increment_root)
     );
 
-    phase_accumulator nco_root (
-        .clk(CLK100MHZ),
-        .rst(rst),
-        .phase_increment(phase_increment_root),
-        .phase(phase_root)
+    chord_frequency_lut chord_frequencies (
+        .note_index(note_index),
+        .phase_increment_third(manual_phase_increment_third),
+        .phase_increment_fifth(manual_phase_increment_fifth)
     );
 
-    phase_accumulator nco_third (
+    midi_uart_rx #(
+        .CLKS_PER_BIT(MIDI_CLKS_PER_BIT),
+        .COUNTER_WIDTH(MIDI_COUNTER_WIDTH)
+    ) midi_receiver (
         .clk(CLK100MHZ),
         .rst(rst),
-        .phase_increment(phase_increment_third),
-        .phase(phase_third)
+        .midi_rx(midi_rx_level),
+        .data_byte(midi_byte),
+        .data_valid(midi_byte_valid),
+        .framing_error(midi_framing_error_unused)
     );
 
-    phase_accumulator nco_fifth (
+    midi_note_parser midi_parser (
         .clk(CLK100MHZ),
         .rst(rst),
-        .phase_increment(phase_increment_fifth),
-        .phase(phase_fifth)
+        .data_byte(midi_byte),
+        .data_valid(midi_byte_valid),
+        .note_event_valid(midi_note_event_valid),
+        .note_event_on(midi_note_event_on),
+        .note_number(midi_note_number),
+        .velocity(midi_velocity_unused)
     );
 
-    cordic_sine oscillator_root (
+    midi_voice_allocator midi_voices (
         .clk(CLK100MHZ),
         .rst(rst),
-        .phase_in(phase_root),
-        .sine_out(root_sample)
+        .note_event_valid(midi_note_event_valid),
+        .note_event_on(midi_note_event_on),
+        .note_number(midi_note_number),
+        .voice_active(midi_voice_active),
+        .voice_note_0(midi_voice_note_0),
+        .voice_note_1(midi_voice_note_1),
+        .voice_note_2(midi_voice_note_2)
     );
 
-    cordic_sine oscillator_third (
-        .clk(CLK100MHZ),
-        .rst(rst),
-        .phase_in(phase_third),
-        .sine_out(third_sample)
+    midi_note_to_phase_inc midi_frequency_0 (
+        .midi_note(midi_voice_note_0),
+        .phase_increment(midi_phase_increment_0)
     );
 
-    cordic_sine oscillator_fifth (
+    midi_note_to_phase_inc midi_frequency_1 (
+        .midi_note(midi_voice_note_1),
+        .phase_increment(midi_phase_increment_1)
+    );
+
+    midi_note_to_phase_inc midi_frequency_2 (
+        .midi_note(midi_voice_note_2),
+        .phase_increment(midi_phase_increment_2)
+    );
+
+    assign selected_phase_increment_0 = midi_mode ? midi_phase_increment_0 :
+                                                    manual_phase_increment_root;
+    assign selected_phase_increment_1 = midi_mode ? midi_phase_increment_1 :
+                                                    manual_phase_increment_third;
+    assign selected_phase_increment_2 = midi_mode ? midi_phase_increment_2 :
+                                                    manual_phase_increment_fifth;
+    assign selected_voice_enable = midi_mode ? midi_voice_active :
+                                   (chord_mode ? 3'b111 : 3'b001);
+
+    phase_accumulator nco_0 (
         .clk(CLK100MHZ),
         .rst(rst),
-        .phase_in(phase_fifth),
-        .sine_out(fifth_sample)
+        .phase_increment(selected_phase_increment_0),
+        .phase(phase_0)
+    );
+
+    phase_accumulator nco_1 (
+        .clk(CLK100MHZ),
+        .rst(rst),
+        .phase_increment(selected_phase_increment_1),
+        .phase(phase_1)
+    );
+
+    phase_accumulator nco_2 (
+        .clk(CLK100MHZ),
+        .rst(rst),
+        .phase_increment(selected_phase_increment_2),
+        .phase(phase_2)
+    );
+
+    cordic_sine oscillator_0 (
+        .clk(CLK100MHZ),
+        .rst(rst),
+        .phase_in(phase_0),
+        .sine_out(sample_0)
+    );
+
+    cordic_sine oscillator_1 (
+        .clk(CLK100MHZ),
+        .rst(rst),
+        .phase_in(phase_1),
+        .sine_out(sample_1)
+    );
+
+    cordic_sine oscillator_2 (
+        .clk(CLK100MHZ),
+        .rst(rst),
+        .phase_in(phase_2),
+        .sine_out(sample_2)
     );
 
     audio_mixer mixer (
-        .chord_mode(chord_mode),
-        .root_sample(root_sample),
-        .third_sample(third_sample),
-        .fifth_sample(fifth_sample),
+        .voice_enable(selected_voice_enable),
+        .root_sample(sample_0),
+        .third_sample(sample_1),
+        .fifth_sample(sample_2),
         .mixed_sample(mixed_sample)
     );
 
@@ -140,9 +234,11 @@ module sintezator_top #(
         .pdm_out(pdm_bit)
     );
 
-    // Nexys A7 AUD_PWM must be open-drain: drive zero, release for one.
     assign AUD_PWM = pdm_bit ? 1'bz : 1'b0;
-    assign AUD_SD  = 1'b1;
-    assign LED[6:0] = 7'b0000001 << note_index;
-    assign LED[7]   = chord_mode;
+    assign AUD_SD = 1'b1;
+    assign LED[6:0] = midi_mode ? 7'b0000000 :
+                                    (7'b0000001 << note_index);
+    assign LED[7] = chord_mode && !midi_mode;
+    assign LED[8] = midi_mode;
+    assign LED[11:9] = midi_mode ? midi_voice_active : 3'b000;
 endmodule
